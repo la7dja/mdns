@@ -27,6 +27,8 @@
 
 % Public interface
 -export([start_link/4,
+         request_service/1,
+         unrequest_service/1,
          publish_service/3,
          publish_service/4,
          unpublish_service/3,
@@ -44,11 +46,14 @@
     socket :: inet:socket(),
     host_name :: string(),
     domain :: string(),
+    requested_services :: [string()],
+    published_services :: [string()],
     broadcast_ip,
     broadcast_port,
     %% This dict is used to merge a series of packets from one sender.
     %% Contains pairs of `{IP, {TRef, Rec=#dns_rec{}}}'.
-    waiting_dict :: dict:dict()
+    waiting_dict :: dict:dict(),
+    request :: inet_dns:dns_rec()
 }).
 
 %
@@ -63,6 +68,9 @@ srv_name() ->
    mdns_socket_server.
 
 waiting_timeout() ->
+    300.
+
+request_timeout() ->
     300.
 
 socket_options(MulticastIP, InterfaceIP0) ->
@@ -90,6 +98,11 @@ start_link(MulticastIP, InterfaceIP, ListenPort, Domain) ->
     Args = [MulticastIP, InterfaceIP, ListenPort, Domain],
     gen_server:start_link({local, srv_name()}, ?MODULE, Args, []).
 
+request_service(ServiceType) ->
+    gen_server:call(srv_name(), {request_service, ServiceType}).
+  
+unrequest_service(ServiceType) ->
+    gen_server:call(srv_name(), {unrequest_service, ServiceType}).
 
 %% @doc Publish a service.
 %% `avahi-publish-service 4d336d342d312d2d343834616435313564343437 _bittorrent._tcp 555'
@@ -117,15 +130,39 @@ init([MulticastIP, InterfaceIP, ListenPort, Domain]) ->
     HostName = net_adm:localhost(),
     State = #state{socket=Socket,
                    domain=Domain,
+                   requested_services=[],
+                   published_services=[],
                    host_name=HostName,
                    broadcast_ip=MulticastIP,
                    broadcast_port=ListenPort,
-                   waiting_dict=dict:new()},
+                   waiting_dict=dict:new(),
+                   request=#dns_rec{header=#dns_header{}, qdlist=[]}},
     {ok, State}.
+
+handle_call({request_service, ServiceType}, _From,
+            State=#state{request=ReqRec, domain=Domain,
+                         requested_services=ServiceTypes}) ->
+    #dns_rec{qdlist=QDList} = ReqRec,
+    PtrDomain = ServiceType ++ "." ++ Domain,
+    DNSQuery = #dns_query{domain=PtrDomain, type=any, class=in},
+    NewServiceTypes=append_new(ServiceType, ServiceTypes),
+    NewState = State#state{requested_services=NewServiceTypes},
+    case QDList of
+        [] ->
+            erlang:send_after(request_timeout(), self(), request_timeout),
+            {reply, ok, NewState#state{request=ReqRec#dns_rec{qdlist=[DNSQuery]}}};
+        _ ->
+            NewReqRec = ReqRec#dns_rec{qdlist=append_new(DNSQuery, QDList)},
+            {reply, ok, NewState#state{request=NewReqRec}}
+    end;
+
+handle_call({unrequest_service, _ServiceType}, _From, State) ->
+  {reply, ok, State};
 
 handle_call({publish_service, Name, ServiceType, Port, SubServices}, _From,
             State=#state{socket=Socket, host_name=HostName, domain=Domain,
-                         broadcast_ip=BIP, broadcast_port=BPort}) ->
+                         broadcast_ip=BIP, broadcast_port=BPort,
+                         published_services=ServiceTypes}) ->
     SrvDomain = service_srv_domain(Name, ServiceType, Domain),
     PtrDomain = service_ptr_domain(ServiceType, Domain),
     ReqRec = #dns_rec{
@@ -143,11 +180,13 @@ handle_call({publish_service, Name, ServiceType, Port, SubServices}, _From,
                    service_srv_dns_rr(SrvDomain, HostName, Port, true)]},
     gen_udp:send(Socket, BIP, BPort, inet_dns:encode(ReqRec)),
     gen_udp:send(Socket, BIP, BPort, inet_dns:encode(ResRec)),
-    {reply, ok, State};
+    NewServiceTypes=append_new(ServiceType, ServiceTypes),
+    {reply, ok, State#state{published_services=NewServiceTypes}};
 
 handle_call({unpublish_service, Name, ServiceType, Port, SubServices}, _From,
             State=#state{socket=Socket, host_name=HostName, domain=Domain,
-                         broadcast_ip=BIP, broadcast_port=BPort}) ->
+                         broadcast_ip=BIP, broadcast_port=BPort,
+                         published_services=PublishedServices}) ->
     SrvDomain = service_srv_domain(Name, ServiceType, Domain),
     PtrDomain = service_ptr_domain(ServiceType, Domain),
     ResRec = #dns_rec{
@@ -160,7 +199,8 @@ handle_call({unpublish_service, Name, ServiceType, Port, SubServices}, _From,
                    services_in_dns_rr(Domain, PtrDomain, false),
                    service_srv_dns_rr(SrvDomain, HostName, Port, false)]},
     gen_udp:send(Socket, BIP, BPort, inet_dns:encode(ResRec)),
-    {reply, ok, State}.
+    NewPublishedServices=lists:delete(ServiceType, PublishedServices),
+    {reply, ok, State#state{published_services=NewPublishedServices}}.
 
 
 handle_cast(not_implemented, State) ->
@@ -190,13 +230,21 @@ handle_info({udp, _Socket, IP, Port, Packet},
             {noreply, State}
     end;
 
+handle_info(request_timeout,
+            State=#state{socket=Socket, broadcast_ip=BIP,
+                         broadcast_port=BPort, request=ReqRec}) ->
+    gen_udp:send(Socket, BIP, BPort, inet_dns:encode(ReqRec)),
+    {noreply, State#state{request=ReqRec#dns_rec{qdlist=[]}}};
+
 handle_info({waiting_timeout, IP},
-            #state{waiting_dict=WaitingDict, domain=Domain} = State) ->
+            #state{waiting_dict=WaitingDict, domain=Domain,
+                   requested_services=RequestedServices,
+                   published_services=PublishedServices} = State) ->
     {_TRef, Rec} = dict:fetch(IP, WaitingDict),
     WaitingDict1 = dict:erase(IP, WaitingDict),
     Rec1 = normalize_record(Rec),
-    inspect_respond_packet(Rec1, IP, Domain),
-    inspect_request_packet(Rec1, IP, Domain),
+    inspect_respond_packet(Rec1, IP, Domain, RequestedServices),
+    inspect_request_packet(Rec1, IP, Domain, PublishedServices),
     {noreply, State#state{waiting_dict=WaitingDict1}}.
 
 terminate(_, _State) ->
@@ -387,62 +435,59 @@ service_srv_domain_to_name(SrvDomain, PtrDomain) ->
 %% anlist: list of answer entries
 %% nslist: list of authority entries
 %% qdlist: list of question entries
-inspect_respond_packet(#dns_rec{ anlist = RRs }, IP, Domain) ->
+inspect_respond_packet(#dns_rec{ anlist = RRs }, IP, Domain, ServiceTypes) ->
     [begin
-        %% PtrDomain = "_bittorrent._tcp.local"
-        %% ServiceType = "_bittorrent._tcp"
-        ServiceType = service_ptr_domain_to_type(PtrDomain, Domain),
-        %% SrvDomain = "4d336d342d312d2d343834616435313564343437._bittorrent._tcp.local"
-        {ok, #dns_rr{type = ptr, class = in, data = SrvDomain}} =
-            follow_pointer(PtrDomain, ptr, RRs),
-        {SrvTTL, ServicePort} =
-        case follow_pointer(SrvDomain, srv, RRs) of
-        {ok, #dns_rr{
-            type = srv, % class = 32769,
-            data = {0,0,Port1,_HostName},
-            ttl = SrvTTL1}} ->
-            {SrvTTL1, Port1};
-        {ok, RR} ->
-            lager:debug("Bad record ~p.", [RR]),
-            {undefined, undefined};
-        {error, _Reason} ->
-            lager:debug("Domain ~p not found.", [SrvDomain]),
-            {undefined, undefined}
-        end,
-        ServiceName = service_srv_domain_to_name(SrvDomain, PtrDomain),
-        SubServiceSuffix = "._sub." ++ ServiceType ++ "." ++ Domain,
-        SubServices = extract_subservices(SrvDomain, SubServiceSuffix, RRs),
-        [mdns_event:notify_sub_service_down(ServiceName, ServiceType, IP, SubType)
-        || {SubType, 0} <- SubServices],
-        [mdns_event:notify_sub_service_up(ServiceName, ServiceType, IP, SubType)
-        || {SubType, TTL} <- SubServices, TTL > 0],
-        case SrvTTL of
-        undefined ->
-            lager:debug("Ignore service."),
-            ok;
-        0 ->
-            mdns_event:notify_service_down(ServiceName, ServiceType, IP, ServicePort);
-        _ ->
-            {ok, #dns_rr{domain = SrvDomain, type = txt, data = Txt}} = follow_pointer(SrvDomain, txt, RRs),
-            Data = lists:map(fun(M) -> split_key_value(M) end, Txt),
-            mdns_event:notify_service_up(ServiceName, ServiceType, IP, ServicePort, Data)
-        end,
-        ok
+         %% PtrDomain = "_bittorrent._tcp.local"
+         %% ServiceType = "_bittorrent._tcp"
+         %% SrvDomain = "4d336d342d312d2d343834616435313564343437._bittorrent._tcp.local"
+         {SrvTTL, ServicePort} =
+             case follow_pointer(SrvDomain, srv, RRs) of
+                 {ok, #dns_rr{
+                         type = srv, % class = 32769,
+                         data = {0,0,Port1,_HostName},
+                         ttl = SrvTTL1}} ->
+                     {SrvTTL1, Port1};
+                 {ok, RR} ->
+                     lager:debug("Bad record ~p.", [RR]),
+                     {undefined, undefined};
+                 {error, _Reason} ->
+                     lager:debug("SrvDomain ~p not found.", [SrvDomain]),
+                     {undefined, undefined}
+             end,
+         ServiceName = service_srv_domain_to_name(SrvDomain, PtrDomain),
+         SubServiceSuffix = "._sub." ++ ServiceType ++ "." ++ Domain,
+         SubServices = extract_subservices(SrvDomain, SubServiceSuffix, RRs),
+         [mdns_event:notify_sub_service_down(ServiceName, ServiceType, IP, SubType)
+          || {SubType, 0} <- SubServices],
+         [mdns_event:notify_sub_service_up(ServiceName, ServiceType, IP, SubType)
+          || {SubType, TTL} <- SubServices, TTL > 0],
+         
+         case SrvTTL of
+             undefined ->
+                 lager:debug("Ignore service."),
+                 ok;
+             0 ->
+                 mdns_event:notify_service_down(ServiceName, ServiceType, IP, ServicePort);
+             _ ->
+                 {ok, #dns_rr{domain = SrvDomain, type = txt, data = Txt}} = follow_pointer(SrvDomain, txt, RRs),
+                 Data = maps:from_list(lists:map(fun(M) -> split_key_value(M) end, Txt)),
+                 mdns_event:notify_service_up(ServiceName, ServiceType, IP, ServicePort, Data)
+         end
      end
-     || #dns_rr{domain = "_services._dns-sd._udp." ++ Domain1,
-                type = ptr, class = in, data = PtrDomain} <- RRs,
-        Domain =:= Domain1].
+     || #dns_rr{domain = PtrDomain, type = ptr, class = in,
+                data = SrvDomain} <- RRs,
+        lists:member(ServiceType = service_ptr_domain_to_type(PtrDomain, Domain),
+                     ServiceTypes)].
 
-inspect_request_packet(#dns_rec{qdlist=Qs}, IP, Domain) ->
+
+inspect_request_packet(#dns_rec{qdlist=Qs}, IP, Domain, ServiceTypes) ->
     %% SrvDomain = "4d336d342d312d2d343834616435313564343437._bittorrent._tcp.local"
     %% ServiceName = "4d336d342d312d2d343834616435313564343437"
     %% PtrDomain = "_bittorrent._tcp.local"
-    [begin
-        {_ServiceName, PtrDomain} = split_name(SrvDomain),
-        ServiceType = service_ptr_domain_to_type(PtrDomain, Domain),
-        mdns_event:notify_service_request(ServiceType, IP)
-     end
-    || #dns_query{domain = SrvDomain} <- Qs].
+    [mdns_event:notify_service_request(ServiceType, IP)
+     || #dns_query{type = ptr, domain = PtrDomain} <- Qs,
+        lists:member(ServiceType = service_ptr_domain_to_type(PtrDomain, Domain),
+                     ServiceTypes)].
 
 -spec follow_pointer(string(), atom(), list(#dns_rr{})) -> {ok, #dns_rr{}} | {error, not_found}.
 follow_pointer(Domain, Type, [RR=#dns_rr{type = Type, domain = Domain} | _]) ->
@@ -467,19 +512,6 @@ extract_subservices(_, _, []) ->
     [].
         
     
-split_name(Domain) ->
-    split_name_1(Domain, "").
-
-split_name_1("\\." ++ Domain, Acc) ->
-    split_name_1(Domain, [$. | Acc]);
-split_name_1("\\\\" ++ Domain, Acc) ->
-    split_name_1(Domain, [$. | Acc]);
-split_name_1("." ++ Domain, Acc) ->
-    {lists:reverse(Acc), Domain};
-split_name_1([H|Domain], Acc) ->
-    split_name_1(Domain, [H | Acc]).
-    
-
 escape_name("." ++ Name) ->
     "\\." ++ escape_name(Name);
 escape_name("\\" ++ Name) ->
@@ -526,3 +558,13 @@ normalize_record(R=#dns_rec{
         nslist=lists:usort(NS),
         arlist=lists:usort(AR)
     }.
+
+
+append_new(Element, []) ->
+    [Element];
+
+append_new(Element, [First|Rest]=List) ->
+    if
+        Element =:= First -> List;
+        true -> [First|append_new(Element, Rest)]
+    end.
