@@ -44,9 +44,6 @@ init([MulticastIP, InterfaceIP, ListenPort, Domain]) ->
 
 
 %% ====================================================================
-get_app_env(Key) ->
-    get_app_env(Key, undefined).
-
 get_app_env(Key, Def) ->
     case application:get_env(?APP, Key) of
         {ok, Value} -> Value;

@@ -5,3 +5,9 @@ log/*
 .eunit
 doc/
 logs/*
+rebar.lock
+_build/
+*~
+\#*
+.#*
+

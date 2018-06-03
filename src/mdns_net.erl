@@ -48,7 +48,7 @@
     broadcast_port,
     %% This dict is used to merge a series of packets from one sender.
     %% Contains pairs of `{IP, {TRef, Rec=#dns_rec{}}}'.
-    waiting_dict :: dict()
+    waiting_dict :: dict:dict()
 }).
 
 %
@@ -168,7 +168,7 @@ handle_cast(not_implemented, State) ->
 
 
 handle_info({udp, _Socket, IP, Port, Packet},
-            #state{domain=Domain, waiting_dict=WaitingDict} = State) ->
+            #state{waiting_dict=WaitingDict} = State) ->
     lager:debug("Receiving a packet from ~p:~p of size ~B~n",
                 [IP, Port, byte_size(Packet)]),
     case inet_dns:decode(Packet) of
@@ -405,7 +405,7 @@ inspect_respond_packet(#dns_rec{ anlist = RRs }, IP, Domain) ->
         {ok, RR} ->
             lager:debug("Bad record ~p.", [RR]),
             {undefined, undefined};
-        {error, Reason} ->
+        {error, _Reason} ->
             lager:debug("Domain ~p not found.", [SrvDomain]),
             {undefined, undefined}
         end,
@@ -436,7 +436,7 @@ inspect_request_packet(#dns_rec{qdlist=Qs}, IP, Domain) ->
     %% ServiceName = "4d336d342d312d2d343834616435313564343437"
     %% PtrDomain = "_bittorrent._tcp.local"
     [begin
-        {ServiceName, PtrDomain} = split_name(SrvDomain),
+        {_ServiceName, PtrDomain} = split_name(SrvDomain),
         ServiceType = service_ptr_domain_to_type(PtrDomain, Domain),
         mdns_event:notify_service_request(ServiceType, IP)
      end
@@ -501,9 +501,9 @@ merge_records(R1=#dns_rec{
         }) ->
     R1#dns_rec{
         qdlist=HQ1 ++ HQ2,
-        anlist=AN2 ++ AN2,
-        nslist=NS2 ++ NS2,
-        arlist=AR2 ++ AR2
+        anlist=AN1 ++ AN2,
+        nslist=NS1 ++ NS2,
+        arlist=AR1 ++ AR2
     }.
 
 normalize_record(R=#dns_rec{
