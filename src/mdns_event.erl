@@ -6,7 +6,7 @@
     add_sup_handler/2,
 	add_handler/2,
 	mgr_name/0,
-	notify_service_up/4,
+	notify_service_up/5,
     notify_service_down/4,
     notify_sub_service_up/4,
     notify_sub_service_down/4,
@@ -32,8 +32,8 @@ add_handler(Handler) ->
 add_handler(Handler, Args) ->
     gen_event:add_handler(mgr_name(), Handler, Args).
 
-notify_service_up(Name, ServiceType, IP, ServicePort) ->
-    notify(mgr_name(), {service_up, Name, ServiceType, IP, ServicePort}).
+notify_service_up(Name, ServiceType, IP, ServicePort, Data) ->
+    notify(mgr_name(), {service_up, Name, ServiceType, IP, ServicePort, Data}).
 
 notify_service_down(Name, ServiceType, IP, ServicePort) ->
     notify(mgr_name(), {service_down, Name, ServiceType, IP, ServicePort}).

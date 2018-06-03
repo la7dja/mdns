@@ -423,7 +423,9 @@ inspect_respond_packet(#dns_rec{ anlist = RRs }, IP, Domain) ->
         0 ->
             mdns_event:notify_service_down(ServiceName, ServiceType, IP, ServicePort);
         _ ->
-            mdns_event:notify_service_up(ServiceName, ServiceType, IP, ServicePort)
+            {ok, #dns_rr{domain = SrvDomain, type = txt, data = Txt}} = follow_pointer(SrvDomain, txt, RRs),
+            Data = lists:map(fun(M) -> split_key_value(M) end, Txt),
+            mdns_event:notify_service_up(ServiceName, ServiceType, IP, ServicePort, Data)
         end,
         ok
      end
@@ -486,7 +488,13 @@ escape_name([H|Name]) ->
     [H] ++ escape_name(Name);
 escape_name("") ->
     "".
-    
+
+split_key_value(Data) ->
+    case lists:splitwith(fun(X) -> X =/= $= end, Data) of
+        {Key, [$= | Value]} -> {Key, Value};
+        {Key, []} -> {Key, true}
+    end.
+
 
 merge_records(R1=#dns_rec{
         qdlist=HQ1,
