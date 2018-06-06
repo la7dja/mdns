@@ -426,10 +426,10 @@ service_ptr_domain(ServiceType, Domain) ->
     ServiceType ++ "." ++ Domain.
 
 service_ptr_domain_to_type(PtrDomain, Domain) ->
-    lists2:delete_suffix("." ++ Domain, PtrDomain).
+    delete_suffix("." ++ Domain, PtrDomain).
 
 service_srv_domain_to_name(SrvDomain, PtrDomain) ->
-    lists2:delete_suffix("." ++ PtrDomain, SrvDomain).
+    delete_suffix("." ++ PtrDomain, SrvDomain).
 
 
 %% anlist: list of answer entries
@@ -501,7 +501,7 @@ extract_subservices(SrvDomain, SubServiceSuffix,
     [#dns_rr{type = ptr, class=in, data = SrvDomain, domain = SSDomain, ttl=TTL}|RRs]) ->
     case lists:suffix(SubServiceSuffix, SSDomain) of
         true ->
-            [{lists2:delete_suffix(SubServiceSuffix, SSDomain), TTL}
+            [{delete_suffix(SubServiceSuffix, SSDomain), TTL}
             |extract_subservices(SrvDomain, SubServiceSuffix, RRs)];
         false ->
             extract_subservices(SrvDomain, SubServiceSuffix, RRs)
@@ -568,3 +568,13 @@ append_new(Element, [First|Rest]=List) ->
         Element =:= First -> List;
         true -> [First|append_new(Element, Rest)]
     end.
+
+
+delete_suffix(_Suffix, []) ->
+  [];
+
+delete_suffix(Suffix, String) when Suffix == String ->
+  [];
+
+delete_suffix(Suffix, [First | Rest]) ->
+  [First | delete_suffix(Suffix, Rest)].
